@@ -3,7 +3,11 @@
 from .data.columns import (
     NUMERIC_COLUMNS,
     SHEET_URLS,
-    COLUMN_INDICES
+    COLUMN_INDICES,
+    COLUMN_NAME_MAPPING,
+    EXCLUDED_DISPLAY_COLUMNS,
+    CLASS_A_BENEFITS,
+    CLASS_B_COSTS
 )
 
 from .ui.text import (
@@ -33,6 +37,10 @@ __all__ = [
     'NUMERIC_COLUMNS',
     'SHEET_URLS',
     'COLUMN_INDICES',
+    'COLUMN_NAME_MAPPING',
+    'EXCLUDED_DISPLAY_COLUMNS',
+    'CLASS_A_BENEFITS',
+    'CLASS_B_COSTS',
     'PAGE_TITLES',
     'FEATURES',
     'SELECTION_LABELS',

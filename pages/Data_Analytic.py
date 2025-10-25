@@ -19,7 +19,12 @@ from constants import (
     INCOME_CASE,
     FAMILY_CASES,
     INCOME_GENDER,
-    CASES
+    CASES,
+    COUNTRY_NAME,
+    COLUMN_NAME_MAPPING,
+    EXCLUDED_DISPLAY_COLUMNS,
+    CLASS_A_BENEFITS,
+    CLASS_B_COSTS
 )
 
 from auth import authenticate
@@ -43,9 +48,9 @@ def get_exchange_rate_options():
     df = load_exchange_rates()
     if df is None:
         return []
-    
-    # Get columns that start with 'ppp' or 'ER_'
-    rate_columns = [col for col in df.columns if col.startswith(('ppp', 'ER_'))]
+
+    # Get the exchange rate columns (PPP and Nominal)
+    rate_columns = [col for col in df.columns if col in ['PPP exchange rates', 'Nominal exchange rates']]
     return rate_columns
 
 def get_exchange_rate_for_country(country_code, rate_type):
@@ -53,19 +58,19 @@ def get_exchange_rate_for_country(country_code, rate_type):
     df = load_exchange_rates()
     if df is None:
         return None
-    
+
     # Find the country in the exchange rate data
-    country_data = df[df['countrycode'] == country_code]
+    country_data = df[df['country'] == country_code]
     if country_data.empty:
         return None
-    
+
     # Get the exchange rate for the specified type
     rate = country_data[rate_type].iloc[0]
-    
+
     # Handle missing values
     if pd.isna(rate) or rate == '':
         return None
-    
+
     return float(rate)
 
 def get_available_countries_with_rates():
@@ -73,8 +78,8 @@ def get_available_countries_with_rates():
     df = load_exchange_rates()
     if df is None:
         return []
-    
-    return df[['countryname', 'countrycode']].dropna().to_dict('records')
+
+    return df[['countryname', 'country']].dropna().to_dict('records')
 
 
 
@@ -331,94 +336,188 @@ def get_selection_indices(selection):
         'alternative': int(selection['alternative'])
     }
 
-def display_final_results(selections, worksheet, exchange_rate_type: str = None) -> None:
+def display_final_results(selections, worksheet, exchange_rate_type: str = None, selected_columns: list = None) -> None:
     if not selections:
         st.warning(MESSAGES['no_data'])
         return
 
+    # Helper function to process dataframe with filters and transformations
+    def process_dataframe(df, sel_labels, sel_cols):
+        df_display = df.T
+        df_display.columns = sel_labels
+
+        # Filter out excluded columns
+        df_display = df_display.drop(index=EXCLUDED_DISPLAY_COLUMNS, errors='ignore')
+
+        # Filter by selected columns if provided
+        if sel_cols:
+            column_code_map = {v: k for k, v in COLUMN_NAME_MAPPING.items()}
+            selected_codes = [column_code_map.get(col, col) for col in sel_cols]
+            available_codes = [code for code in selected_codes if code in df_display.index]
+            if available_codes:
+                df_display = df_display.loc[available_codes]
+
+        # Apply proper signs based on category classification
+        for category in df_display.index:
+            if category in CLASS_A_BENEFITS:
+                df_display.loc[category] = df_display.loc[category].abs()
+            elif category in CLASS_B_COSTS:
+                df_display.loc[category] = -df_display.loc[category].abs()
+
+        # Map column names to readable names
+        df_display.index = df_display.index.map(lambda x: COLUMN_NAME_MAPPING.get(x, x))
+        return df_display
+
     try:
         from pages.Data_Analytic import prepare_chart_data
-        # Don't convert to indices - use the original selection values
+
+        # Prepare exchange rate adjusted data (if applicable)
         chart_df = prepare_chart_data(selections, worksheet, exchange_rate_type)
+
+        # Always prepare raw data (without exchange rate conversion)
+        chart_df_raw = prepare_chart_data(selections, worksheet, None)
     except Exception as e:
         st.error(f"Error preparing chart data: {e}")
         return
 
-    with st.expander("Display result"):
-        if exchange_rate_type:
-            st.info(f"Values converted using exchange rate: **{exchange_rate_type}**")
+    if exchange_rate_type:
+        st.info(f"Values converted using exchange rate: **{exchange_rate_type}**")
+    else:
+        st.info("Values shown in original currency (no exchange rate conversion applied)")
+
+    # Create labels with country name and counter (e.g., "Japan-1", "Japan-2")
+    country_counters = {}
+    selection_labels = []
+    for sel in selections:
+        country_code = sel.get('country') or sel.get('countries', [None])[0]
+        if country_code:
+            country_name = COUNTRY_NAME.get(country_code, country_code)
+            country_counters[country_code] = country_counters.get(country_code, 0) + 1
+            selection_labels.append(f"{country_name}-{country_counters[country_code]}")
         else:
-            st.info("Values shown in original currency (no exchange rate conversion applied)")
+            selection_labels.append(f"Selection {len(selection_labels)+1}")
 
-        # Table view (transpose so categories = rows)
-        chart_df_display = chart_df.T
-        selection_labels = [f"Selection {sel.get('index', i+1)}" for i, sel in enumerate(selections)]
-        chart_df_display.columns = selection_labels
-        
-        # Display the data table
-        st.subheader("Data Table")
-        st.dataframe(chart_df_display, use_container_width=True)
+    # Process both dataframes with the same transformations
+    chart_df_display = process_dataframe(chart_df, selection_labels, selected_columns)
+    chart_df_raw_display = process_dataframe(chart_df_raw, selection_labels, selected_columns)
 
-        # Chart visualization
-        st.subheader("Stacked Bar Chart")
-        
-        # Use the transposed data directly for plotting
-        import plotly.graph_objects as go
-        
-        # Reset index to make categories a column
-        chart_df_plot = chart_df_display.reset_index()
-        
-        # Get selection columns (exclude 'index' column)
-        selection_cols = [col for col in chart_df_plot.columns if col != 'index']
-        
-        # Create the stacked bar chart
-        fig = go.Figure()
-        
-        # Define distinct colors for better visibility
-        distinct_colors = [
-            '#FF6B6B',  # Red
-            '#4ECDC4',  # Teal
-            '#45B7D1',  # Blue
-            '#96CEB4',  # Green
-            '#FFEAA7',  # Yellow
-            '#DDA0DD',  # Plum
-            '#FFB347',  # Orange
-            '#87CEEB',  # Sky Blue
-            '#F0E68C',  # Khaki
-            '#FA8072',  # Salmon
-            '#98FB98',  # Pale Green
-            '#DEB887',  # Burlywood
-            '#FF69B4',  # Hot Pink
-            '#40E0D0',  # Turquoise
-            '#9370DB'   # Medium Purple
-        ]
-        
-        # Add a trace for each category
-        for idx, row in chart_df_plot.iterrows():
-            category = row['index']
-            values = [row[col] for col in selection_cols]
-            
-            fig.add_trace(go.Bar(
-                name=category,
-                x=selection_cols,
-                y=values,
-                text=[f"{v:.0f}" if v != 0 else "" for v in values],  # Show values on bars
-                textposition='inside',
-                marker_color=distinct_colors[idx % len(distinct_colors)]  # Assign distinct colors
-            ))
-        
-        fig.update_layout(
-            barmode='stack',
-            title="Stacked Bar Chart",
-            xaxis_title="Selections",
-            yaxis_title="Amount",
-            height=600,
-            showlegend=True
+    # Display the data table
+    st.subheader("Data Table")
+
+    # Add download buttons for both versions
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if exchange_rate_type:
+            csv_data_converted = chart_df_display.to_csv()
+            st.download_button(
+                label=f"📥 Download Data ({exchange_rate_type})",
+                data=csv_data_converted,
+                file_name=f"welfare_data_{exchange_rate_type}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        else:
+            csv_data = chart_df_display.to_csv()
+            st.download_button(
+                label="📥 Download Data as CSV",
+                data=csv_data,
+                file_name="welfare_data_table.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+
+    with col2:
+        csv_data_raw = chart_df_raw_display.to_csv()
+        st.download_button(
+            label="📥 Download Raw Data (Original Currency)",
+            data=csv_data_raw,
+            file_name="welfare_data_raw.csv",
+            mime="text/csv",
+            use_container_width=True
         )
 
-        import hashlib
-        chart_key = hashlib.md5(str(chart_df_plot.values.tolist()).encode()).hexdigest()[:8]
-        st.plotly_chart(fig, use_container_width=True, key=f"stacked_bar_{chart_key}")
+    st.dataframe(chart_df_display, use_container_width=True)
+
+    # Chart visualization
+    st.subheader("Stacked Bar Chart")
+
+    # Use the transposed data directly for plotting
+    import plotly.graph_objects as go
+
+    # Reset index to make categories a column
+    chart_df_plot = chart_df_display.reset_index()
+
+    # Get selection columns (exclude 'index' column)
+    selection_cols = [col for col in chart_df_plot.columns if col != 'index']
+
+    # Create the stacked bar chart
+    fig = go.Figure()
+
+    # Define distinct colors using a scientifically-designed palette
+    # Colors chosen to maximize perceptual difference and avoid duplicates
+    distinct_colors = [
+        '#FF1744',  # 1. Vivid Red
+        '#2979FF',  # 2. Vivid Blue
+        '#00E676',  # 3. Vivid Green
+        '#FF9100',  # 4. Vivid Orange
+        '#D500F9',  # 5. Vivid Purple
+        '#00E5FF',  # 6. Vivid Cyan
+        '#FFEA00',  # 7. Vivid Yellow
+        '#FF4081',  # 8. Vivid Pink
+        '#00BFA5',  # 9. Vivid Teal
+        '#6200EA',  # 10. Deep Purple
+        '#76FF03',  # 11. Lime
+        '#FF6E40',  # 12. Deep Orange
+        '#304FFE',  # 13. Indigo
+        '#AEEA00',  # 14. Light Lime
+        '#DD2C00',  # 15. Dark Red
+        '#0091EA',  # 16. Light Blue
+        '#64DD17',  # 17. Light Green
+        '#AA00FF',  # 18. Deep Purple Accent
+        '#FFD600',  # 19. Gold
+        '#FF3D00',  # 20. Red Orange
+        '#1DE9B6',  # 21. Aqua
+        '#651FFF',  # 22. Purple
+        '#C6FF00',  # 23. Yellow Green
+        '#F50057',  # 24. Magenta
+        '#00B8D4',  # 25. Dark Cyan
+        '#FFAB00',  # 26. Amber
+        '#448AFF',  # 27. Sky Blue
+        '#69F0AE',  # 28. Mint
+        '#E040FB',  # 29. Orchid
+        '#FFC400',  # 30. Bright Amber
+        '#18FFFF',  # 31. Electric Cyan
+    ]
+
+    # Add traces for each category (signs already applied above)
+    for idx, row in chart_df_plot.iterrows():
+        category = row['index']
+        values = [row[col] for col in selection_cols]
+
+        fig.add_trace(go.Bar(
+            name=category,
+            x=selection_cols,
+            y=values,
+            text=[f"{v:.0f}" if v != 0 else "" for v in values],
+            textposition='inside',
+            marker_color=distinct_colors[idx % len(distinct_colors)],
+        ))
+
+    fig.update_layout(
+        barmode='relative',  # Changed from 'stack' to 'relative' for proper positive/negative handling
+        title="Stacked Bar Chart",
+        xaxis_title="Selections",
+        yaxis_title="Amount",
+        yaxis=dict(dtick=200),
+        height=600,
+        showlegend=True,
+        hovermode='x unified'
+    )
+
+    import hashlib
+    chart_key = hashlib.md5(str(chart_df_plot.values.tolist()).encode()).hexdigest()[:8]
+    st.plotly_chart(fig, use_container_width=True, key=f"stacked_bar_{chart_key}")
 
 def run():
     """Run the data analytics page."""
@@ -456,10 +555,26 @@ def run():
     if st.sidebar.button(BUTTON_LABELS['delete'], use_container_width=True):
         delete_or_clear_items()
 
+    # Column selection for display
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Display Category")
+
+    # Get all available columns (excluding the excluded ones)
+    available_columns = [col for col in NUMERIC_COLUMNS if col not in EXCLUDED_DISPLAY_COLUMNS]
+    # Convert to readable names for display
+    available_column_names = [COLUMN_NAME_MAPPING.get(col, col) for col in available_columns]
+
+    selected_column_names = st.sidebar.multiselect(
+        "Select columns to display:",
+        options=available_column_names,
+        default=[],
+        help="Choose which columns to show in the data table and chart. Leave empty to show all columns."
+    )
+
     # Exchange rate selection
     st.sidebar.markdown("---")
     st.sidebar.markdown("### Exchange Rate Settings")
-    
+
     # Get available exchange rate options
     rate_options = get_exchange_rate_options()
     if rate_options:
@@ -474,7 +589,14 @@ def run():
 
     if st.sidebar.button(BUTTON_LABELS['show_result'], use_container_width=True):
         exchange_rate_type = selected_rate if selected_rate != "None" else None
-        display_final_results(st.session_state['scenario1_selections'], worksheet, exchange_rate_type)
+        # If no columns selected, pass None to show all columns
+        columns_to_show = selected_column_names if selected_column_names else None
+        display_final_results(
+            st.session_state['scenario1_selections'],
+            worksheet,
+            exchange_rate_type,
+            columns_to_show
+        )
 
     # Display cached selections
     display_selections(st.session_state['scenario1_selections'], 1)
